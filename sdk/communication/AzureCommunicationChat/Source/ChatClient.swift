@@ -35,9 +35,11 @@ public class ChatClient {
     private let endpoint: String
     private let credential: CommunicationTokenCredential
     private let options: AzureCommunicationChatClientOptions
+    private var registrarClient: RegistrarClient?
     private let service: Chat
     private var signalingClient: CommunicationSignalingClient?
     private var signalingClientStarted: Bool = false
+    private var pushNotificationsStarted: Bool = false
 
     // MARK: Initializers
 
@@ -72,6 +74,11 @@ public class ChatClient {
     }
 
     // MARK: Private Methods
+    
+    /// Return unique registration id for push notifications.
+    private func getRegistrationId() -> String {
+        return UUID().uuidString
+    }
 
     /// Converts [ChatParticipant] to [ChatParticipantInternal] for internal use.
     /// - Parameter chatParticipants: The array of ChatParticipants.
@@ -273,5 +280,79 @@ public class ChatClient {
         }
 
         signalingClient!.off(event: event)
+    }
+
+    /// Start push notifications. Receiving of notifications can be expected ~1 second after successfully registering.
+    /// - Parameters:
+    ///   - deviceToken: APNS push token.
+    ///   - completionHandler: Success indicates request to register for notifications has been received.
+    public func startPushNotifications(
+        deviceToken: String,
+        completionHandler: @escaping (Result<Void, AzureError>, HTTPURLResponse?) -> Void
+    ) {
+        guard !pushNotificationsStarted else {
+            completionHandler(.failure(AzureError.client("Push notifications already started.")), nil)
+            return
+        }
+
+        do {
+            // Initialize the RegistrarClient
+            registrarClient = try RegistrarClient(
+                endpoint: RegistrarSettings.endpoint,
+                credential: credential,
+                registrationId: getRegistrationId()
+            )
+
+            // Client description should match valid APNS templates
+            let clientDescription = RegistrarClientDescription(
+                appId: RegistrarSettings.appId,
+                languageId: RegistrarSettings.languageId,
+                platform: RegistrarSettings.platform,
+                platformUIVersion: RegistrarSettings.platformUIVersion,
+                templateKey: RegistrarSettings.templateKey
+            )
+
+            // Path is device token
+            let transport = RegistrarTransport(
+                ttl: RegistrarSettings.ttl,
+                path: deviceToken,
+                context: RegistrarSettings.context
+            )
+
+            // Register for push notifications
+            registrarClient?.setRegistration(with: clientDescription, for: [transport]) { response, error in
+                if let error = error {
+                    completionHandler(
+                        .failure(AzureError.client("Failed to start push notifications", error)),
+                        response
+                    )
+                } else {
+                    self.pushNotificationsStarted = true
+                    completionHandler(.success(()), response)
+                }
+            }
+        } catch {
+            options.logger.error("Failed to start push notifications with error: \(error)")
+        }
+    }
+
+    /// Stop push notifications.
+    /// - Parameter completionHandler: Success indicates push notifications have been stopped.
+    public func stopPushNotifications(
+        completionHandler: @escaping (Result<Void, AzureError>, HTTPURLResponse?) -> Void
+    ) {
+        guard pushNotificationsStarted else {
+            completionHandler(.failure(AzureError.client("Push notifications are not enabled.")), nil)
+            return
+        }
+
+        registrarClient?.deleteRegistration { response, error in
+            if let error = error {
+                completionHandler(.failure(AzureError.client("Failed to stop push notifications", error)), response)
+            } else {
+                self.pushNotificationsStarted = false
+                completionHandler(.success(()), response)
+            }
+        }
     }
 }
